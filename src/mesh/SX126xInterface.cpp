@@ -264,10 +264,59 @@ template <typename T> int16_t SX126xInterface<T>::getCurrentRSSI()
     return (int16_t)round(rssi);
 }
 
+template <typename T> void SX126xInterface<T>::enableInterrupt(void (*callback)())
+{
+#ifdef LORA_DIO1_SOFTWARE_POLL
+    irqPollingActive = true;
+    pollTxMode = isIsrTxCallback(callback);
+    scheduleIrqPollTick();
+#else
+    lora.setDio1Action(callback);
+#endif
+}
+
 template <typename T> void SX126xInterface<T>::disableInterrupt()
 {
+#ifdef LORA_DIO1_SOFTWARE_POLL
+    irqPollingActive = false;
+#else
     lora.clearDio1Action();
+#endif
 }
+
+#ifdef LORA_DIO1_SOFTWARE_POLL
+template <typename T> void SX126xInterface<T>::handleSoftwareLoraIrqPoll()
+{
+    if (!irqPollingActive)
+        return;
+
+    // Read and clear the raw SX126x IRQ status using chip-specific masks.
+    uint16_t irq = lora.getIrqFlags();
+    const uint16_t rxEventMask =
+        RADIOLIB_SX126X_IRQ_RX_DONE | RADIOLIB_SX126X_IRQ_TIMEOUT | RADIOLIB_SX126X_IRQ_CRC_ERR | RADIOLIB_SX126X_IRQ_HEADER_ERR;
+    const uint16_t noisyRxMask = RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED | RADIOLIB_SX126X_IRQ_HEADER_VALID;
+
+    // Preamble/header-only flags are not complete packets. Clear them so a noisy channel cannot
+    // repeatedly trigger readData() and starve TX scheduling.
+    if (!pollTxMode && (irq & noisyRxMask) && ((irq & ~noisyRxMask) == 0U)) {
+        lora.clearIrqFlags(noisyRxMask);
+        scheduleIrqPollTick();
+        return;
+    }
+
+    if (pollTxMode) {
+        if (irq & (RADIOLIB_SX126X_IRQ_TX_DONE | RADIOLIB_SX126X_IRQ_TIMEOUT)) {
+            deliverPendingIrqFromPoll(ISR_TX);
+            return;
+        }
+    } else if (irq & rxEventMask) {
+        deliverPendingIrqFromPoll(ISR_RX);
+        return;
+    }
+
+    scheduleIrqPollTick();
+}
+#endif
 
 template <typename T> void SX126xInterface<T>::setStandby()
 {

@@ -52,17 +52,17 @@ class STM32WLx_ModuleWrapper : public STM32WLx_Module
 
 class RadioLibInterface : public RadioInterface, protected concurrency::NotifiedWorkerThread
 {
+    MeshPacketQueue txQueue = MeshPacketQueue(MAX_TX_QUEUE);
+
+  protected:
     /// Used as our notification from the ISR
-    enum PendingISR { ISR_NONE = 0, ISR_RX, ISR_TX, TRANSMIT_DELAY_COMPLETED };
+    enum PendingISR { ISR_NONE = 0, ISR_RX, ISR_TX, TRANSMIT_DELAY_COMPLETED, ISR_POLL_TICK };
 
     /**
      * Raw ISR handler that just calls our polymorphic method
      */
     static void isrTxLevel0(), isrLevel0Common(PendingISR code);
 
-    MeshPacketQueue txQueue = MeshPacketQueue(MAX_TX_QUEUE);
-
-  protected:
     ModemType_t modemType = RADIOLIB_MODEM_LORA;
     DataRate_t getDataRate() const { return {.lora = {.spreadingFactor = sf, .bandwidth = bw, .codingRate = cr}}; }
     PacketConfig_t getPacketConfig() const
@@ -342,4 +342,10 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
     bool removePendingTXPacket(NodeNum from, PacketId id, uint32_t hop_limit_lt) override;
 
     void checkRxDoneIrqFlag();
+
+    /** Schedule and deliver software-polled radio IRQ events. */
+    void deliverPendingIrqFromPoll(PendingISR cause);
+    void scheduleIrqPollTick();
+    static bool isIsrTxCallback(void (*callback)());
+    virtual void handleSoftwareLoraIrqPoll() {}
 };
