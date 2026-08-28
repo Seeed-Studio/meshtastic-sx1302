@@ -26,6 +26,9 @@
 #include "platform/portduino/PortduinoGlue.h"
 #include "platform/portduino/SimRadio.h"
 #include "platform/portduino/USBHal.h"
+#ifdef MESHTASTIC_USE_SX1302
+#include "SX1302Interface.h"
+#endif
 #endif
 
 #ifdef ARCH_STM32WL
@@ -248,6 +251,10 @@ std::unique_ptr<RadioInterface> initLoRa()
         switch (portduino_config.lora_module) {
         case use_rf95:
             return std::unique_ptr<RadioInterface>(new RF95Interface(hal, cs, irq, rst, busy));
+#ifdef MESHTASTIC_USE_SX1302
+        case use_sx1302:
+            return std::unique_ptr<RadioInterface>(new SX1302Interface);
+#endif
         case use_sx1262:
             return std::unique_ptr<RadioInterface>(new SX1262Interface(hal, cs, irq, rst, busy));
         case use_sx1268:

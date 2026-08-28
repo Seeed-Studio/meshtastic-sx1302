@@ -36,6 +36,9 @@ enum lora_module_enum {
     use_simradio,
     use_autoconf,
     use_rf95,
+#ifdef MESHTASTIC_USE_SX1302
+    use_sx1302,
+#endif
     use_sx1262,
     use_sx1268,
     use_sx1280,
@@ -70,7 +73,11 @@ std::string exec(const char *cmd);
 extern struct portduino_config_struct {
     // Lora
     std::map<lora_module_enum, std::string> loraModules = {
-        {use_simradio, "sim"},  {use_autoconf, "auto"}, {use_rf95, "RF95"},     {use_sx1262, "sx1262"}, {use_sx1268, "sx1268"},
+        {use_simradio, "sim"},  {use_autoconf, "auto"}, {use_rf95, "RF95"},
+#ifdef MESHTASTIC_USE_SX1302
+        {use_sx1302, "sx1302"},
+#endif
+        {use_sx1262, "sx1262"}, {use_sx1268, "sx1268"},
         {use_sx1280, "sx1280"}, {use_lr1110, "lr1110"}, {use_lr1120, "lr1120"}, {use_lr1121, "lr1121"}, {use_llcc68, "LLCC68"}};
 
     std::map<screen_modules, std::string> screen_names = {{x11, "X11"},         {fb, "FB"},           {st7789, "ST7789"},
@@ -86,6 +93,12 @@ extern struct portduino_config_struct {
     bool has_device_id = false;
     uint8_t device_id[16] = {0};
     std::string lora_spi_dev = "";
+#ifdef MESHTASTIC_USE_SX1302
+    std::string sx1261_spi_dev = "/dev/spidev0.1";
+    uint8_t sx1302_rf_chain = 0;
+    uint8_t sx1302_if_chain = 8;
+    std::string sx1302_radio = "sx1250";
+#endif
     std::string lora_usb_serial_num = "";
     int lora_spi_dev_int = 0;
     int lora_default_gpiochip = 0;
@@ -105,6 +118,10 @@ extern struct portduino_config_struct {
     pinMapping lora_irq_pin = {"Lora", "IRQ"};
     pinMapping lora_busy_pin = {"Lora", "Busy"};
     pinMapping lora_reset_pin = {"Lora", "Reset"};
+#ifdef MESHTASTIC_USE_SX1302
+    pinMapping sx1302_reset_pin = {"Lora", "SX1302_Reset"};
+    pinMapping sx1261_reset_pin = {"Lora", "SX1261_Reset"};
+#endif
     pinMapping lora_txen_pin = {"Lora", "TXen"};
     pinMapping lora_rxen_pin = {"Lora", "RXen"};
     pinMapping lora_sx126x_ant_sw_pin = {"Lora", "SX126X_ANT_SW"};
@@ -199,11 +216,21 @@ extern struct portduino_config_struct {
 
     std::unordered_map<std::string, std::string> hat_plus_custom_fields;
 
-    pinMapping *all_pins[21] = {&lora_cs_pin,
-                                &lora_irq_pin,
-                                &lora_busy_pin,
-                                &lora_reset_pin,
-                                &lora_txen_pin,
+    pinMapping *all_pins[
+#ifdef MESHTASTIC_USE_SX1302
+        23
+#else
+        21
+#endif
+        ] = {&lora_cs_pin,
+             &lora_irq_pin,
+             &lora_busy_pin,
+             &lora_reset_pin,
+#ifdef MESHTASTIC_USE_SX1302
+             &sx1302_reset_pin,
+             &sx1261_reset_pin,
+#endif
+             &lora_txen_pin,
                                 &lora_rxen_pin,
                                 &lora_sx126x_ant_sw_pin,
                                 &lora_pa_detect_pin,
@@ -274,6 +301,17 @@ extern struct portduino_config_struct {
                 lora_spi_dev = lora_spi_dev.substr(5);
             out << YAML::Key << "spidev" << YAML::Value << lora_spi_dev;
         }
+#ifdef MESHTASTIC_USE_SX1302
+        if (lora_module == use_sx1302) {
+            auto sx1261Path = sx1261_spi_dev;
+            if (sx1261Path.rfind("/dev/", 0) == 0)
+                sx1261Path = sx1261Path.substr(5);
+            out << YAML::Key << "SX1261_spidev" << YAML::Value << sx1261Path;
+            out << YAML::Key << "SX1302_RF_CHAIN" << YAML::Value << static_cast<int>(sx1302_rf_chain);
+            out << YAML::Key << "SX1302_IF_CHAIN" << YAML::Value << static_cast<int>(sx1302_if_chain);
+            out << YAML::Key << "SX1302_RADIO" << YAML::Value << sx1302_radio;
+        }
+#endif
         if (lora_usb_serial_num != "")
             out << YAML::Key << "USB_Serialnum" << YAML::Value << lora_usb_serial_num;
         if (spiSpeed != 2000000)

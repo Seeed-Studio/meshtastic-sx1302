@@ -4,3 +4,6 @@
 [submodule "meshtestic"]
 	path = meshtestic
 	url = https://github.com/meshtastic/meshTestic
+[submodule "third_party/sx1302_hal"]
+	path = third_party/sx1302_hal
+	url = https://github.com/Lora-net/sx1302_hal.git

@@ -6,8 +6,11 @@ The default wiring is:
     SX1302 -> /dev/spidev0.0 (CS0)
     SX1261 -> /dev/spidev0.1 (CS1)
 
-The probe only performs reads.  It does not reset either chip or change any
-radio configuration.
+By default the probe only performs reads.  With ``--reset`` it applies the
+board reset wiring before probing:
+
+    SX1302 GPIO17: 1 -> 0
+    SX1261 GPIO5:  0 -> 1
 
 Requires the Linux ``spidev`` Python module.  Run it on the target host with:
 
@@ -21,8 +24,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 try:
@@ -34,6 +40,8 @@ except ImportError:  # pragma: no cover - depends on the target host
 DEFAULT_SX1261_DEVICE = "/dev/spidev0.1"
 DEFAULT_SX1302_DEVICE = "/dev/spidev0.0"
 DEFAULT_SPEED_HZ = 2_000_000
+DEFAULT_SX1302_RESET_GPIO = 17
+DEFAULT_SX1261_RESET_GPIO = 5
 
 SX1261_GET_STATUS = 0xC0
 SX1261_READ_REGISTER = 0x1D
@@ -116,6 +124,87 @@ def open_spi(path: str, speed_hz: int) -> SpiDevice:
             pass
         raise
     return device
+
+
+def _gpio_value_path(number: int) -> Path:
+    return Path(f"/sys/class/gpio/gpio{number}/value")
+
+
+class _GpiosetHold:
+    """Keep a modern GPIO character-device line requested at its final value."""
+
+    def __init__(self, number: int, first: int, gpiochip: int):
+        self.number = number
+        self.process = subprocess.Popen(
+            [
+                "gpioset",
+                "--chip",
+                str(gpiochip),
+                "--toggle",
+                "1ms,86400s",
+                f"{number}={first}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.005)
+        if self.process.poll() is not None:
+            message = (self.process.stderr.read() if self.process.stderr else "").strip()
+            raise OSError(f"failed to reset GPIO{number} with gpioset: {message or 'process exited'}")
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+
+
+def reset_gpio(number: int, first: int, second: int, gpiochip: int) -> _GpiosetHold | None:
+    """Apply a reset sequence through sysfs or modern libgpiod's gpioset."""
+    value_path = _gpio_value_path(number)
+    if value_path.exists():
+        direction_path = value_path.parent / "direction"
+        try:
+            direction_path.write_text("out\n")
+            value_path.write_text(f"{first}\n")
+            time.sleep(0.001)
+            value_path.write_text(f"{second}\n")
+            time.sleep(0.010)
+            return None
+        except OSError as exc:
+            raise OSError(f"failed to reset GPIO{number} through {value_path}: {exc}") from exc
+
+    try:
+        # gpioset's first toggle produces the requested first -> second edge;
+        # the long second period keeps the final level asserted during SPI reads.
+        return _GpiosetHold(number, first, gpiochip)
+    except FileNotFoundError as exc:
+        raise OSError(
+            f"GPIO{number} is not exported and gpioset is unavailable; "
+            "export it through /sys/class/gpio or install libgpiod"
+        ) from exc
+    except OSError:
+        raise
+
+
+def reset_bundled_radios(sx1302_gpio: int, sx1261_gpio: int, gpiochip: int) -> list[_GpiosetHold]:
+    holds: list[_GpiosetHold] = []
+    sx1302_hold = reset_gpio(sx1302_gpio, 1, 0, gpiochip)
+    if sx1302_hold is not None:
+        holds.append(sx1302_hold)
+    try:
+        sx1261_hold = reset_gpio(sx1261_gpio, 0, 1, gpiochip)
+    except OSError:
+        for hold in holds:
+            hold.close()
+        raise
+    if sx1261_hold is not None:
+        holds.append(sx1261_hold)
+    return holds
 
 
 def transfer(spi: SpiDevice, tx: Sequence[int]) -> bytes:
@@ -263,6 +352,32 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"SPI clock frequency (default: {DEFAULT_SPEED_HZ})",
     )
     parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="apply SX1302 GPIO17 (1->0) and SX1261 GPIO5 (0->1) resets before probing",
+    )
+    parser.add_argument(
+        "--sx1302-reset-gpio",
+        type=int,
+        default=DEFAULT_SX1302_RESET_GPIO,
+        metavar="N",
+        help=f"SX1302 reset GPIO (default: {DEFAULT_SX1302_RESET_GPIO})",
+    )
+    parser.add_argument(
+        "--sx1261-reset-gpio",
+        type=int,
+        default=DEFAULT_SX1261_RESET_GPIO,
+        metavar="N",
+        help=f"SX1261 reset GPIO (default: {DEFAULT_SX1261_RESET_GPIO})",
+    )
+    parser.add_argument(
+        "--reset-gpiochip",
+        type=int,
+        default=0,
+        metavar="N",
+        help="gpiochip number used by the reset GPIOs when sysfs is unavailable (default: 0)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="emit machine-readable JSON instead of human-readable output",
@@ -275,6 +390,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.speed_hz <= 0:
         parser.error("--speed-hz must be positive")
+    if args.sx1302_reset_gpio < 0 or args.sx1261_reset_gpio < 0:
+        parser.error("reset GPIO numbers must be non-negative")
+    if args.reset_gpiochip < 0:
+        parser.error("reset gpiochip number must be non-negative")
     if spidev is None:
         print(
             "error: Python module 'spidev' is required; install the host "
@@ -283,10 +402,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    results = [
-        run_probe("SX1261", args.sx1261_device, args.speed_hz),
-        run_probe("SX1302", args.sx1302_device, args.speed_hz),
-    ]
+    reset_holds: list[_GpiosetHold] = []
+    try:
+        if args.reset:
+            try:
+                reset_holds = reset_bundled_radios(
+                    args.sx1302_reset_gpio, args.sx1261_reset_gpio, args.reset_gpiochip
+                )
+            except OSError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+
+        results = [
+            run_probe("SX1261", args.sx1261_device, args.speed_hz),
+            run_probe("SX1302", args.sx1302_device, args.speed_hz),
+        ]
+    finally:
+        for hold in reset_holds:
+            hold.close()
     if args.json:
         print(json.dumps([asdict(result) for result in results], indent=2))
     else:

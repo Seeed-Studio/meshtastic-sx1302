@@ -1,0 +1,22 @@
+Meta:
+  name: Seeed SenseCAP M1 SX1302/SX1261
+  support: community
+  compatible:
+    - raspberry-pi
+
+Lora:
+  Module: sx1302
+  spidev: spidev0.0
+  SX1261_spidev: spidev0.1
+  SX1302_RF_CHAIN: 0
+  SX1302_IF_CHAIN: 8
+  SX1302_RADIO: sx1250
+  SX1302_Reset:
+    pin: 17
+    line: 17
+    gpiochip: 0
+  SX1261_Reset:
+    pin: 5
+    line: 5
+    gpiochip: 0
+  spiSpeed: 2000000

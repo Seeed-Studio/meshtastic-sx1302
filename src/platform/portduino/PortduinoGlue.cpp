@@ -859,6 +859,18 @@ bool loadConfig(const char *configPath)
                     }
                 }
             }
+#ifdef MESHTASTIC_USE_SX1302
+            if (portduino_config.lora_module == use_sx1302) {
+                portduino_config.sx1261_spi_dev = yamlConfig["Lora"]["SX1261_spidev"].as<std::string>("spidev0.1");
+                if (portduino_config.sx1261_spi_dev.find("/dev/") != 0)
+                    portduino_config.sx1261_spi_dev = "/dev/" + portduino_config.sx1261_spi_dev;
+                portduino_config.sx1302_rf_chain = yamlConfig["Lora"]["SX1302_RF_CHAIN"].as<uint8_t>(0);
+                portduino_config.sx1302_if_chain = yamlConfig["Lora"]["SX1302_IF_CHAIN"].as<uint8_t>(8);
+                portduino_config.sx1302_radio = yamlConfig["Lora"]["SX1302_RADIO"].as<std::string>("sx1250");
+                readGPIOFromYaml(yamlConfig["Lora"]["SX1302_Reset"], portduino_config.sx1302_reset_pin);
+                readGPIOFromYaml(yamlConfig["Lora"]["SX1261_Reset"], portduino_config.sx1261_reset_pin);
+            }
+#endif
             if (yamlConfig["Lora"]["rfswitch_table"]) {
                 portduino_config.has_rfswitch_table = true;
                 portduino_config.rfswitch_table[0].mode = LR11x0::MODE_STBY;
