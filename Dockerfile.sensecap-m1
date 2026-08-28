@@ -1,0 +1,59 @@
+# Build the sensecap-m1 (Seeed WM1302 / SX1302) firmware as a native ARM64
+# binary by running the entire toolchain inside an emulated linux/arm64
+# container. The container's own glibc IS the target glibc, so the resulting
+# ELF runs on a matching Debian arm64 host (e.g. Raspberry Pi OS Trixie,
+# glibc 2.41) with zero cross-compiler or symbol-version headaches.
+#
+# Prereq (one-time, on x86 host): register QEMU user-mode for arm64 via binfmt:
+#   docker run --privileged --rm tonistiigi/binfmt --install arm64
+#
+# Build:
+#   docker buildx build --platform linux/arm64 -f Dockerfile.sensecap-m1 \
+#       -t meshtastic-sensecap-m1:arm64 .
+#
+# Extract the binary to ./release/:
+#   docker run --rm -v "$PWD/release:/out" meshtastic-sensecap-m1:arm64 \
+#       sh -c 'cp /opt/firmware/.pio/build/sensecap-m1/meshtasticd \
+#              /out/meshtasticd_linux_aarch64 && file /out/meshtasticd_linux_aarch64'
+#
+# Under QEMU emulation the compile is CPU-slow (~10-20 min). If you have a
+# native ARM64 machine, build there instead for speed.
+
+# Build (pass --platform linux/arm64 on the command line; see header).
+# The proxy build-args (HTTP_PROXY/HTTPS_PROXY/…) are Docker predefined args
+# auto-injected as env vars — no ARG needed.
+FROM debian:trixie AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# sensecap-m1 link deps (all native arm64 inside the container, no multiarch):
+#   yaml-cpp uv bluetooth gpiod i2c  -> portduino_base
+#   usb-1.0                          -> libch341 library.json
+#   ulfius orcania ssl               -> PiWebServer / HTTP API (optional)
+# No SDL2/X11 — HAS_SCREEN=0, MESHTASTIC_EXCLUDE_SCREEN=1.
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        g++ git curl ca-certificates pkg-config \
+        python3-pip python3-grpc-tools \
+        libgpiod-dev libyaml-cpp-dev libbluetooth-dev libi2c-dev libuv1-dev \
+        libusb-1.0-0-dev libulfius-dev liborcania-dev libssl-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -U platformio
+
+WORKDIR /opt/firmware
+COPY . /opt/firmware
+
+# Download PIO deps (platform/framework/libs) with retry — the GitHub fetches
+# are flaky over proxies. --mount=cache persists /root/.platformio across builds
+# so already-fetched packages survive retries and rebuilds.
+RUN --mount=type=cache,target=/root/.platformio \
+    n=0; until pio pkg install -e sensecap-m1; do \
+      n=$((n+1)); [ $n -ge 5 ] && { echo "pkg install failed after 5 attempts"; exit 1; }; \
+      echo "Network error, retry $n/5 in 15s..."; sleep 15; \
+    done
+
+# Compile (deps cached from the step above).
+RUN --mount=type=cache,target=/root/.platformio \
+    pio run -e sensecap-m1
+
+# Binary: /opt/firmware/.pio/build/sensecap-m1/meshtasticd
