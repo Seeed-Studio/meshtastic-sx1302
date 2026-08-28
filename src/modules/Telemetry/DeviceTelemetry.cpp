@@ -7,6 +7,9 @@
 #include "RTC.h"
 #include "RadioLibInterface.h"
 #include "Router.h"
+#if defined(ARCH_PORTDUINO) && defined(MESHTASTIC_USE_SX1302)
+#include "SX1302Interface.h"
+#endif
 #include "TransmitHistory.h"
 #include "configuration.h"
 #include "main.h"
@@ -144,6 +147,15 @@ meshtastic_Telemetry DeviceTelemetryModule::getLocalStatsTelemetry()
         telemetry.variant.local_stats.num_tx_relay = SimRadio::instance->txRelay;
         telemetry.variant.local_stats.num_tx_dropped = SimRadio::instance->txDrop;
     }
+#if defined(MESHTASTIC_USE_SX1302)
+    if (SX1302Interface::instance) {
+        telemetry.variant.local_stats.num_packets_tx = SX1302Interface::instance->txGood;
+        telemetry.variant.local_stats.num_packets_rx = SX1302Interface::instance->rxGood + SX1302Interface::instance->rxBad;
+        telemetry.variant.local_stats.num_packets_rx_bad = SX1302Interface::instance->rxBad;
+        telemetry.variant.local_stats.num_tx_relay = SX1302Interface::instance->txRelay;
+        telemetry.variant.local_stats.num_tx_dropped = SX1302Interface::instance->txDrop;
+    }
+#endif
 #else
     telemetry.variant.local_stats.heap_total_bytes = memGet.getHeapSize();
     telemetry.variant.local_stats.heap_free_bytes = memGet.getFreeHeap();

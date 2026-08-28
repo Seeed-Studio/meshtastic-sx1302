@@ -29,6 +29,11 @@ class SX1302Interface : public RadioInterface, protected concurrency::NotifiedWo
     bool isIRQPending() override { return false; }
     uint32_t getPacketTime(uint32_t totalPacketLen, bool received = false) override;
 
+    /** DeviceTelemetry reads live packet counters from the active instance. */
+    static SX1302Interface *instance;
+    uint32_t rxBad = 0, rxGood = 0, txGood = 0, txRelay = 0;
+    uint16_t txDrop = 0;
+
   protected:
     void onNotify(uint32_t notification) override;
     int16_t getCurrentRSSI() override { return lastRssi; }
@@ -53,8 +58,6 @@ class SX1302Interface : public RadioInterface, protected concurrency::NotifiedWo
     uint32_t txDelayStartedAt = 0;
     uint32_t txDelayMsec = 0;
     int16_t lastRssi = -120;
-    uint32_t rxBad = 0, rxGood = 0, txGood = 0, txRelay = 0;
-    uint16_t txDrop = 0;
 };
 
 #endif

@@ -46,12 +46,15 @@ bool resetBundledRadios()
 }
 } // namespace
 
+SX1302Interface *SX1302Interface::instance;
+
 SX1302Interface::SX1302Interface()
     : NotifiedWorkerThread("SX1302Radio"),
       hal(portduino_config.lora_spi_dev, portduino_config.sx1302_rf_chain, portduino_config.sx1302_if_chain,
           portduino_config.sx1302_radio),
       cad(portduino_config.sx1261_spi_dev, portduino_config.spiSpeed)
 {
+    instance = this;
 }
 
 SX1302Interface::~SX1302Interface()
