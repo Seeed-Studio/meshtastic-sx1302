@@ -87,6 +87,9 @@ bool SX1302Interface::init()
     active = true;
     powerMon->setState(meshtastic_PowerMon_State_Lora_RXOn);
     schedulePollTick();
+    LOG_INFO("SX1302 RF params: freq=%.3f MHz, bw=%.0f kHz, sf=%u, cr=4/%u, power=%d, preamble=%u, rf_chain=%u, if_chain=%u", getFreq(),
+             bw, (unsigned)sf, (unsigned)cr, (int)power, (unsigned)preambleLength, (unsigned)portduino_config.sx1302_rf_chain,
+             (unsigned)portduino_config.sx1302_if_chain);
     LOG_INFO("SX1302/SX1250 init success; IF%d active, SX1261 CAD enabled", portduino_config.sx1302_if_chain);
     return true;
 }
@@ -111,6 +114,9 @@ bool SX1302Interface::reconfigure()
     if (result) {
         powerMon->setState(meshtastic_PowerMon_State_Lora_RXOn);
         schedulePollTick();
+        LOG_INFO("SX1302 RF params: freq=%.3f MHz, bw=%.0f kHz, sf=%u, cr=4/%u, power=%d, preamble=%u, rf_chain=%u, if_chain=%u", getFreq(),
+                 bw, (unsigned)sf, (unsigned)cr, (int)power, (unsigned)preambleLength, (unsigned)portduino_config.sx1302_rf_chain,
+                 (unsigned)portduino_config.sx1302_if_chain);
     }
     return result;
 }
@@ -225,10 +231,13 @@ void SX1302Interface::completeSending()
 bool SX1302Interface::deliverPacket(const sx1302_bridge_rx_packet_t &packet)
 {
     if (packet.size < sizeof(PacketHeader) || packet.size > sizeof(radioBuffer)) {
+        LOG_WARN("SX1302 RX drop: bad size=%u (hdr=%u, buf=%u)", (unsigned)packet.size, (unsigned)sizeof(PacketHeader),
+                 (unsigned)sizeof(radioBuffer));
         rxBad++;
         return false;
     }
     if (packet.status == SX1302_BRIDGE_STAT_CRC_BAD) {
+        LOG_WARN("SX1302 RX drop: CRC bad, size=%u", (unsigned)packet.size);
         rxBad++;
         return false;
     }
@@ -236,6 +245,8 @@ bool SX1302Interface::deliverPacket(const sx1302_bridge_rx_packet_t &packet)
     memcpy(&radioBuffer, packet.payload, packet.size);
     const auto payloadLength = packet.size - sizeof(PacketHeader);
     if (radioBuffer.header.from == 0 || payloadLength > sizeof(radioBuffer.payload)) {
+        LOG_WARN("SX1302 RX drop: from=0x%x or payload %u > %u", (unsigned)radioBuffer.header.from, (unsigned)payloadLength,
+                 (unsigned)sizeof(radioBuffer.payload));
         rxBad++;
         return false;
     }
@@ -259,6 +270,10 @@ bool SX1302Interface::deliverPacket(const sx1302_bridge_rx_packet_t &packet)
 
     rxGood++;
     lastRssi = meshPacket->rx_rssi;
+    LOG_INFO("SX1302 RX ok: from=0x%x, to=0x%x, id=0x%x, ch=%u, rssi=%d, snr=%.1f, size=%u, payload=%u",
+             (unsigned)radioBuffer.header.from, (unsigned)radioBuffer.header.to, (unsigned)radioBuffer.header.id,
+             (unsigned)radioBuffer.header.channel, (int)meshPacket->rx_rssi, (double)packet.snr, (unsigned)packet.size,
+             (unsigned)payloadLength);
 #ifdef LED_LORA
     loraRxPacketObservable.notifyObservers(meshPacket->from);
 #endif
@@ -277,6 +292,11 @@ void SX1302Interface::handlePollTick()
     if (!active)
         return;
 
+    static uint32_t heartbeat = 0;
+    if (++heartbeat % 500 == 0)
+        LOG_INFO("SX1302 poll tick: receiving=%d, sending=%d, freq=%.3f, sf=%u, bw=%.0f, cr=4/%u", (int)receiving,
+                 (int)(sendingPacket != nullptr), getFreq(), (unsigned)sf, bw, (unsigned)cr);
+
     if (sendingPacket != nullptr) {
         if (!hal.txFree()) {
             schedulePollTick();
@@ -289,8 +309,11 @@ void SX1302Interface::handlePollTick()
         sx1302_bridge_rx_packet_t packets[4] {};
         const int count = hal.receive(packets, 4);
         if (count < 0) {
+            LOG_ERROR("SX1302 RX: hal.receive returned %d", count);
             portduino_status.LoRa_in_error = true;
         } else {
+            if (count > 0)
+                LOG_INFO("SX1302 RX: fetched %d packet(s) from concentrator", count);
             for (int i = 0; i < count; ++i)
                 deliverPacket(packets[i]);
         }
