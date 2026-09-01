@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 
@@ -14,39 +15,33 @@ def write_compat_source(source, compat_dir, contents):
         compat_source.write_text(contents)
 
 
-def make_loragw_sx1302_compat(source, compat_dir):
-    service_private_syncword = """        DEBUG_PRINTF(\"INFO: configuring LoRa (Service) SF%u with syncword PRIVATE (0x12)\\n\", lora_service_sf);
-        err |= lgw_reg_w(SX1302_REG_RX_TOP_LORA_SERVICE_FSK_FRAME_SYNCH0_PEAK1_POS, 2);
-        err |= lgw_reg_w(SX1302_REG_RX_TOP_LORA_SERVICE_FSK_FRAME_SYNCH1_PEAK2_POS, 4);
-"""
-    tx_private_syncword = """                DEBUG_MSG(\"Setting LoRa syncword 0x12\\n\");
-                err = lgw_reg_w(SX1302_REG_TX_TOP_FRAME_SYNCH_0_PEAK1_POS(pkt_data->rf_chain), 2);
-                CHECK_ERR(err);
-                err = lgw_reg_w(SX1302_REG_TX_TOP_FRAME_SYNCH_1_PEAK2_POS(pkt_data->rf_chain), 4);
-                CHECK_ERR(err);
-"""
+def apply_meshtastic_patch(compat_dir, source_name, patch_file):
+    """Apply the Meshtastic HAL diff to the compat copy.
 
-    contents = source.read_text()
-    if contents.count(service_private_syncword) != 1 or contents.count(tx_private_syncword) != 1:
-        raise RuntimeError("unsupported sx1302_hal loragw_sx1302.c layout")
+    Covers preamble size (10/8/12 -> 16 symbols, MultiSF + LoRa Service modems)
+    and syncword (MultiSF + LoRa Service + TX -> 0x2B, the PRIVATE branches that
+    run since the firmware sets lorawan_public=false). Kept as a unified diff so
+    the upstream change stays reviewable and the build fails loudly if upstream
+    drifts away from the expected context.
+    """
+    result = subprocess.run(
+        ["patch", "-p3", "--batch", "-i", str(patch_file)],
+        cwd=compat_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to apply meshtastic HAL patch {patch_file} to "
+            f"{compat_dir / source_name}:\n{result.stdout}{result.stderr}"
+        )
 
-    contents = contents.replace(
-        service_private_syncword,
-        """        DEBUG_PRINTF(\"INFO: configuring LoRa (Service) SF%u with syncword Meshtastic (0x2B)\\n\", lora_service_sf);
-        err |= lgw_reg_w(SX1302_REG_RX_TOP_LORA_SERVICE_FSK_FRAME_SYNCH0_PEAK1_POS, 0x2 << 1);
-        err |= lgw_reg_w(SX1302_REG_RX_TOP_LORA_SERVICE_FSK_FRAME_SYNCH1_PEAK2_POS, 0xB << 1);
-""",
-    )
-    contents = contents.replace(
-        tx_private_syncword,
-        """                DEBUG_MSG(\"Setting LoRa syncword Meshtastic 0x2B\\n\");
-                err = lgw_reg_w(SX1302_REG_TX_TOP_FRAME_SYNCH_0_PEAK1_POS(pkt_data->rf_chain), 0x2 << 1);
-                CHECK_ERR(err);
-                err = lgw_reg_w(SX1302_REG_TX_TOP_FRAME_SYNCH_1_PEAK2_POS(pkt_data->rf_chain), 0xB << 1);
-                CHECK_ERR(err);
-""",
-    )
-    write_compat_source(source, compat_dir, contents)
+
+def make_loragw_sx1302_compat(source, compat_dir, meshtastic_patch):
+    # The compat copy is the pristine upstream source; every Meshtastic tweak
+    # (preamble size + syncword) lands through the unified diff in meshtastic_patch.
+    write_compat_source(source, compat_dir, source.read_text())
+    apply_meshtastic_patch(compat_dir, source.name, meshtastic_patch)
 
 
 project_dir = Path(env.subst("$PROJECT_DIR"))
@@ -56,7 +51,11 @@ libtools_src = hal_root / "libtools" / "src"
 config_include = project_dir / "src" / "platform" / "portduino" / "sx1302" / "hal_config"
 build_dir = Path(env.subst("$BUILD_DIR"))
 loragw_compat_src = build_dir / "sx1302_hal_compat"
-make_loragw_sx1302_compat(loragw_src / "loragw_sx1302.c", loragw_compat_src)
+make_loragw_sx1302_compat(
+    loragw_src / "loragw_sx1302.c",
+    loragw_compat_src,
+    project_dir / "extra_scripts" / "sx1302_hal_meshtastic.patch",
+)
 
 env.Append(
     CPPPATH=[

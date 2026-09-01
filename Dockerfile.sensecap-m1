@@ -33,7 +33,7 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 #   ulfius orcania ssl               -> PiWebServer / HTTP API (optional)
 # No SDL2/X11 — HAS_SCREEN=0, MESHTASTIC_EXCLUDE_SCREEN=1.
 RUN apt-get update && apt-get install --no-install-recommends -y \
-        g++ git curl ca-certificates pkg-config \
+        g++ git curl ca-certificates pkg-config patch file \
         python3-pip python3-grpc-tools \
         libgpiod-dev libyaml-cpp-dev libbluetooth-dev libi2c-dev libuv1-dev \
         libusb-1.0-0-dev libulfius-dev liborcania-dev libssl-dev \
