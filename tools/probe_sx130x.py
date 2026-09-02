@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Probe the SX1261 and SX1302 connected to SPI0.
+"""Probe the SX1261, SX1302 and STTS751 of an SX130x gateway on SPI0/I2C1.
 
 The default wiring is:
 
     SX1302 -> /dev/spidev0.0 (CS0)
     SX1261 -> /dev/spidev0.1 (CS1)
+    STTS751 temperature sensor -> /dev/i2c-1 (0x39, 0x3b or 0x38)
+
+The sx1302_hal requires the STTS751 on SPI concentrators (lgw_start() fails
+when no sensor responds), so all three probes must pass for the script to
+exit 0.
 
 By default the probe only performs reads.  With ``--reset`` it applies the
 board reset wiring before probing:
@@ -12,7 +17,8 @@ board reset wiring before probing:
     SX1302 GPIO17: 1 -> 0
     SX1261 GPIO5:  0 -> 1
 
-Requires the Linux ``spidev`` Python module.  Run it on the target host with:
+Requires the Linux ``spidev`` Python module and either ``smbus2`` or
+``smbus``.  Run it on the target host with:
 
     tools/probe_sx1261_sx1302.py
 
@@ -36,12 +42,25 @@ try:
 except ImportError:  # pragma: no cover - depends on the target host
     spidev = None  # type: ignore[assignment]
 
+try:  # smbus2 is pure Python and is commonly used on Raspberry Pi hosts.
+    import smbus2
+except ImportError:  # pragma: no cover - depends on the target host
+    smbus2 = None  # type: ignore[assignment]
+
+try:
+    import smbus
+except ImportError:  # pragma: no cover - depends on the target host
+    smbus = None  # type: ignore[assignment]
+
 
 DEFAULT_SX1261_DEVICE = "/dev/spidev0.1"
 DEFAULT_SX1302_DEVICE = "/dev/spidev0.0"
 DEFAULT_SPEED_HZ = 2_000_000
 DEFAULT_SX1302_RESET_GPIO = 17
 DEFAULT_SX1261_RESET_GPIO = 5
+DEFAULT_I2C_DEVICE = "/dev/i2c-1"
+# Matches I2C_PORT_TEMP_SENSOR in the sx1302_hal (loragw_stts751.h).
+DEFAULT_TEMP_SENSOR_ADDRESSES = (0x39, 0x3B, 0x38)
 
 SX1261_GET_STATUS = 0xC0
 SX1261_READ_REGISTER = 0x1D
@@ -51,6 +70,28 @@ SX1261_PRAM_VERSION_LENGTH = 15
 SX1302_READ_TARGET = 0x00
 SX1302_COMMON_VERSION_REGISTER = 0x5606
 SX1302_COMMON_PAGE_REGISTER = 0x5600
+
+STTS751_REG_TEMP_H = 0x00
+STTS751_REG_STATUS = 0x01
+STTS751_REG_TEMP_L = 0x02
+STTS751_REG_PROD_ID = 0xFD
+STTS751_REG_MAN_ID = 0xFE
+STTS751_REG_REV_ID = 0xFF
+
+STTS751_STATUS_TRIPT = 1 << 0
+STTS751_STATUS_TRIPL = 1 << 5
+STTS751_STATUS_TRIPH = 1 << 6
+
+STTS751_PRODUCT_IDS = {
+    0x00: "STTS751-0",
+    0x01: "STTS751-1",
+}
+STTS751_EXPECTED_PRODUCT_BY_ADDRESS = {
+    0x39: 0x00,  # STTS751-0DP3F
+    0x3B: 0x01,  # STTS751-1DP3F
+    0x38: 0x00,  # STTS751-0DP3F on full duplex CN490 ref design
+}
+STTS751_MANUFACTURER_ID = 0x53
 
 SX1261_MODES = {
     0x00: "sleep",
@@ -83,6 +124,14 @@ class SpiDevice(Protocol):
         ...
 
 
+class I2CBus(Protocol):
+    def read_byte_data(self, address: int, register: int) -> int:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
 @dataclass
 class ProbeResult:
     chip: str
@@ -90,6 +139,7 @@ class ProbeResult:
     ok: bool
     details: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    address: int | None = None
 
 
 def _parse_spidev_path(path: str) -> tuple[int, int]:
@@ -124,6 +174,42 @@ def open_spi(path: str, speed_hz: int) -> SpiDevice:
             pass
         raise
     return device
+
+
+def _parse_i2c_path(path: str) -> int:
+    """Return the Linux I2C bus number encoded in a device path."""
+    match = re.fullmatch(r"(?:/dev/)?i2c-(\d+)", path)
+    if not match:
+        raise ValueError(
+            f"{path!r} is not a Linux I2C device path "
+            "(expected /dev/i2c-N)"
+        )
+    return int(match.group(1))
+
+
+def _parse_i2c_address(value: str) -> int:
+    try:
+        address = int(value, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid I2C address {value!r} (use e.g. 0x39)"
+        ) from exc
+    if not 0 <= address <= 0x7F:
+        raise argparse.ArgumentTypeError(
+            f"I2C address 0x{address:x} is outside the 7-bit range 0x00..0x7f"
+        )
+    return address
+
+
+def open_i2c(path: str) -> I2CBus:
+    """Open a Linux I2C bus using smbus2 or python-smbus."""
+    bus_type = smbus2 or smbus
+    if bus_type is None:
+        raise RuntimeError(
+            "Python module 'smbus2' or 'smbus' is required; install "
+            "smbus2 (or the host package python3-smbus)"
+        )
+    return bus_type.SMBus(_parse_i2c_path(path))
 
 
 def _gpio_value_path(number: int) -> Path:
@@ -296,7 +382,7 @@ def probe_sx1302(spi: SpiDevice, device: str) -> ProbeResult:
     )
 
 
-def run_probe(chip: str, device: str, speed_hz: int) -> ProbeResult:
+def run_spi_probe(chip: str, device: str, speed_hz: int) -> ProbeResult:
     spi: SpiDevice | None = None
     try:
         spi = open_spi(device, speed_hz)
@@ -310,23 +396,175 @@ def run_probe(chip: str, device: str, speed_hz: int) -> ProbeResult:
             spi.close()
 
 
+def read_i2c_register(bus: I2CBus, address: int, register: int) -> int:
+    """Read one STTS751 register using an SMBus byte-data transaction."""
+    return int(bus.read_byte_data(address, register)) & 0xFF
+
+
+def _decode_temperature(high_byte: int, low_byte: int) -> tuple[int, float]:
+    raw = (high_byte << 8) | low_byte
+    if raw & 0x8000:
+        raw -= 0x10000
+    return raw, raw / 256.0
+
+
+def probe_stts751_address(bus: I2CBus, device: str, address: int) -> ProbeResult:
+    """Probe one candidate address and return structured evidence."""
+    details: dict[str, Any] = {
+        "address_hex": f"0x{address:02x}",
+        "evidence": [],
+        "warnings": [],
+    }
+
+    try:
+        product_id = read_i2c_register(bus, address, STTS751_REG_PROD_ID)
+        manufacturer_id = read_i2c_register(bus, address, STTS751_REG_MAN_ID)
+    except Exception as exc:
+        return ProbeResult(
+            chip="STTS751",
+            device=device,
+            ok=False,
+            details=details,
+            error=str(exc),
+            address=address,
+        )
+
+    product_name = STTS751_PRODUCT_IDS.get(product_id)
+    identity_ok = (
+        product_name is not None and manufacturer_id == STTS751_MANUFACTURER_ID
+    )
+    details.update(
+        {
+            "product_id": f"0x{product_id:02x}",
+            "product": product_name or "unknown",
+            "manufacturer_id": f"0x{manufacturer_id:02x}",
+        }
+    )
+
+    try:
+        revision_id = read_i2c_register(bus, address, STTS751_REG_REV_ID)
+        details["revision_id"] = f"0x{revision_id:02x}"
+    except Exception as exc:
+        details["warnings"].append(f"revision read failed: {exc}")
+
+    expected_product = STTS751_EXPECTED_PRODUCT_BY_ADDRESS.get(address)
+    if expected_product is not None and product_id != expected_product:
+        details["address_variant_match"] = False
+        details["warnings"].append(
+            f"address normally maps to {STTS751_PRODUCT_IDS[expected_product]}"
+        )
+    else:
+        details["address_variant_match"] = True
+
+    if product_name is not None:
+        details["evidence"].append(f"valid product ID ({product_name})")
+    if manufacturer_id == STTS751_MANUFACTURER_ID:
+        details["evidence"].append("valid ST manufacturer ID")
+
+    if identity_ok:
+        try:
+            status = read_i2c_register(bus, address, STTS751_REG_STATUS)
+            details["status"] = f"0x{status:02x}"
+            details["status_trip"] = bool(status & STTS751_STATUS_TRIPT)
+            details["status_low_limit"] = bool(status & STTS751_STATUS_TRIPL)
+            details["status_high_limit"] = bool(status & STTS751_STATUS_TRIPH)
+        except Exception as exc:
+            details["warnings"].append(f"status read failed: {exc}")
+
+        try:
+            # Match the Semtech HAL order: read LSB before MSB.
+            low_byte = read_i2c_register(bus, address, STTS751_REG_TEMP_L)
+            high_byte = read_i2c_register(bus, address, STTS751_REG_TEMP_H)
+            raw_temperature, temperature_c = _decode_temperature(high_byte, low_byte)
+            details.update(
+                {
+                    "temperature_raw": f"0x{raw_temperature & 0xFFFF:04x}",
+                    "temperature_high": f"0x{high_byte:02x}",
+                    "temperature_low": f"0x{low_byte:02x}",
+                    "temperature_c": temperature_c,
+                }
+            )
+            details["evidence"].append("temperature registers readable")
+        except Exception as exc:
+            details["warnings"].append(f"temperature read failed: {exc}")
+
+    return ProbeResult(
+        chip="STTS751",
+        device=device,
+        ok=identity_ok,
+        details=details,
+        address=address,
+    )
+
+
+def probe_stts751(device: str, addresses: Sequence[int]) -> ProbeResult:
+    """Scan the candidate addresses like the sx1302_hal and summarize the result."""
+    try:
+        bus = open_i2c(device)
+    except Exception as exc:
+        return ProbeResult(chip="STTS751", device=device, ok=False, error=str(exc))
+
+    try:
+        attempts = [probe_stts751_address(bus, device, address) for address in addresses]
+    finally:
+        bus.close()
+
+    probed = ", ".join(f"0x{address:02x}" for address in addresses)
+    found = next((attempt for attempt in attempts if attempt.ok), None)
+    if found is None:
+        return ProbeResult(
+            chip="STTS751",
+            device=device,
+            ok=False,
+            details={
+                "probed_addresses": probed,
+                "warnings": [
+                    f"0x{attempt.address:02x}: {attempt.error or 'not an STTS751'}"
+                    for attempt in attempts
+                ],
+            },
+            error="no temperature sensor found (the sx1302_hal requires one)",
+        )
+
+    details = dict(found.details)
+    details["probed_addresses"] = probed
+    for attempt in attempts:
+        if attempt is found:
+            continue
+        details.setdefault("warnings", []).append(
+            f"0x{attempt.address:02x}: {attempt.error or 'not an STTS751'}"
+        )
+    return ProbeResult(
+        chip="STTS751",
+        device=device,
+        ok=True,
+        details=details,
+        address=found.address,
+    )
+
+
 def print_human(results: Sequence[ProbeResult]) -> None:
     for result in results:
         state = "PASS" if result.ok else "FAIL"
-        print(f"{result.chip} @ {result.device}: {state}")
+        location = f"{result.chip} @ {result.device}"
+        if result.address is not None:
+            location += f" address 0x{result.address:02x}"
+        print(f"{location}: {state}")
         if result.error:
             print(f"  error: {result.error}")
-            continue
         for key, value in result.details.items():
-            if key == "evidence":
+            if key in {"evidence", "warnings"}:
                 if value:
-                    print(f"  {key}: {', '.join(value)}")
+                    print(f"  {key}: {', '.join(str(item) for item in value)}")
+                continue
+            if key == "temperature_c":
+                print(f"  temperature: {value:.2f} °C")
                 continue
             print(f"  {key.replace('_', ' ')}: {value}")
     print(
-        "Result: PASS (both expected chips responded)"
+        "Result: PASS (SX1302 + SX1261 + STTS751 all responded)"
         if all(result.ok for result in results)
-        else "Result: FAIL (one or more expected chips did not respond)"
+        else "Result: FAIL (one or more expected devices did not respond)"
     )
 
 
@@ -350,6 +588,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="HZ",
         help=f"SPI clock frequency (default: {DEFAULT_SPEED_HZ})",
+    )
+    parser.add_argument(
+        "--i2c-device",
+        default=DEFAULT_I2C_DEVICE,
+        metavar="PATH",
+        help=f"Linux I2C device node for the temperature sensor (default: {DEFAULT_I2C_DEVICE})",
+    )
+    parser.add_argument(
+        "--temp-sensor-address",
+        dest="temp_sensor_addresses",
+        action="append",
+        type=_parse_i2c_address,
+        metavar="ADDR",
+        help="probe one STTS751 address (repeatable; default: 0x39, 0x3b and 0x38)",
     )
     parser.add_argument(
         "--reset",
@@ -394,10 +646,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("reset GPIO numbers must be non-negative")
     if args.reset_gpiochip < 0:
         parser.error("reset gpiochip number must be non-negative")
+    temp_sensor_addresses = (
+        tuple(args.temp_sensor_addresses)
+        if args.temp_sensor_addresses
+        else DEFAULT_TEMP_SENSOR_ADDRESSES
+    )
     if spidev is None:
         print(
             "error: Python module 'spidev' is required; install the host "
             "package (for example, python3-spidev)",
+            file=sys.stderr,
+        )
+        return 2
+    if smbus2 is None and smbus is None:
+        print(
+            "error: Python module 'smbus2' or 'smbus' is required; install "
+            "smbus2 (or the host package python3-smbus)",
             file=sys.stderr,
         )
         return 2
@@ -414,8 +678,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
 
         results = [
-            run_probe("SX1261", args.sx1261_device, args.speed_hz),
-            run_probe("SX1302", args.sx1302_device, args.speed_hz),
+            run_spi_probe("SX1261", args.sx1261_device, args.speed_hz),
+            run_spi_probe("SX1302", args.sx1302_device, args.speed_hz),
+            probe_stts751(args.i2c_device, temp_sensor_addresses),
         ]
     finally:
         for hold in reset_holds:
