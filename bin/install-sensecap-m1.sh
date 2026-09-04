@@ -21,8 +21,21 @@ echo "=== SenseCAP M1 meshtasticd installer ==="
 echo "Package dir: $PKG_DIR"
 echo
 
-# --- 1. Create meshtasticd user/group ----------------------------------------
-echo "[1/9] Creating meshtasticd user/group ..."
+# --- 1. Install system dependencies -------------------------------------------
+echo "[1/9] Installing system dependencies (Debian 13) ..."
+# Runtime libs from `readelf -d meshtasticd`; libulfius pulls in liborcania/
+# libyder/libmicrohttpd etc. via apt dependency resolution.
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libusb-1.0-0 \
+    libyaml-cpp0.8 \
+    libuv1t64 \
+    libgpiod3 \
+    libi2c0 \
+    libulfius2.7t64
+
+# --- 2. Create meshtasticd user/group ----------------------------------------
+echo "[2/9] Creating meshtasticd user/group ..."
 if ! getent group meshtasticd >/dev/null; then
     addgroup --system meshtasticd
 fi
@@ -37,18 +50,18 @@ for grp in spi gpio dialout i2c; do
     fi
 done
 
-# --- 2. Install binary -------------------------------------------------------
-echo "[2/9] Installing meshtasticd binary ..."
+# --- 3. Install binary -------------------------------------------------------
+echo "[3/9] Installing meshtasticd binary ..."
 install -D -m 0755 "$PKG_DIR/meshtasticd" /usr/bin/meshtasticd
 
-# --- 3. Create directory structure -------------------------------------------
-echo "[3/9] Creating directories ..."
+# --- 4. Create directory structure -------------------------------------------
+echo "[4/9] Creating directories ..."
 mkdir -p /etc/meshtasticd/{config.d,available.d,ssl}
 mkdir -p /var/lib/meshtasticd
 mkdir -p /usr/share/meshtasticd/web
 
-# --- 4. Install config files -------------------------------------------------
-echo "[4/9] Installing config files ..."
+# --- 5. Install config files -------------------------------------------------
+echo "[5/9] Installing config files ..."
 
 # Main config — preserve existing user config on upgrade.
 if [[ -f /etc/meshtasticd/config.yaml ]]; then
@@ -65,8 +78,8 @@ if [[ -d "$PKG_DIR/config.d" ]]; then
     cp -r "$PKG_DIR/config.d/." /etc/meshtasticd/available.d/
 fi
 
-# --- 5. Enable HTTPS web backend ---------------------------------------------
-echo "[5/9] Enabling HTTPS web backend (port 9443) ..."
+# --- 6. Enable HTTPS web backend ---------------------------------------------
+echo "[6/9] Enabling HTTPS web backend (port 9443) ..."
 # Uncomment "Port: 9443" under the Webserver: section.
 sed -i 's/^#\s*Port: 9443/  Port: 9443/' /etc/meshtasticd/config.yaml
 # Ensure the RootPath/SSLKey/SSLCert lines are uncommented too.
@@ -80,16 +93,16 @@ if [[ -d "$PKG_DIR/web" ]] && [[ -n "$(ls -A "$PKG_DIR/web" 2>/dev/null)" ]]; th
     cp -r "$PKG_DIR/web/." /usr/share/meshtasticd/web/
 fi
 
-# --- 6. Install udev rules ----------------------------------------------------
-echo "[6/9] Installing udev rules ..."
+# --- 7. Install udev rules ----------------------------------------------------
+echo "[7/9] Installing udev rules ..."
 install -D -m 0644 "$PKG_DIR/99-meshtasticd-udev.rules" \
         /lib/udev/rules.d/99-meshtasticd-udev.rules
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger --subsystem-match=spidev 2>/dev/null || true
 udevadm trigger --subsystem-match=gpio 2>/dev/null || true
 
-# --- 7. Install systemd service ----------------------------------------------
-echo "[7/9] Installing systemd service ..."
+# --- 8. Install systemd service ----------------------------------------------
+echo "[8/9] Installing systemd service ..."
 cat > /lib/systemd/system/meshtasticd.service <<'UNIT'
 [Unit]
 Description=Meshtastic Daemon (SenseCAP M1 / SX1302)
@@ -109,8 +122,8 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 UNIT
 
-# --- 8. Set ownership + activate service -------------------------------------
-echo "[8/9] Setting ownership and enabling service ..."
+# --- 9. Set ownership + activate service -------------------------------------
+echo "[9/9] Setting ownership and enabling service ..."
 chown -R meshtasticd:meshtasticd /var/lib/meshtasticd
 chown -R meshtasticd:meshtasticd /etc/meshtasticd
 chown -R meshtasticd:meshtasticd /usr/share/meshtasticd 2>/dev/null || true
@@ -123,23 +136,6 @@ if systemctl is-active --quiet meshtasticd; then
     systemctl restart meshtasticd
 else
     systemctl start meshtasticd
-fi
-
-# --- 9. Check SPI overlay + print status -------------------------------------
-echo "[9/9] Checking SPI overlay ..."
-spi_enabled=false
-for cfg in /boot/firmware/config.txt /boot/config.txt; do
-    if [[ -f "$cfg" ]] && grep -qi 'dtparam=spi=on' "$cfg"; then
-        spi_enabled=true
-        break
-    fi
-done
-if [[ "$spi_enabled" = false ]]; then
-    echo
-    echo "  ⚠ WARNING: SPI not enabled in /boot config."
-    echo "    Add 'dtparam=spi=on' to /boot/firmware/config.txt (or /boot/config.txt)"
-    echo "    and reboot, or the SX1302 concentrator cannot be accessed."
-    echo "    (For Pi 5 with GPIO on gpiochip4, also edit the lora config's gpiochip.)"
 fi
 
 echo
